@@ -70,12 +70,12 @@ powershell -ExecutionPolicy Bypass -File $ps -Uninstall # 删除任务
 
 图形界面：`taskschd.msc` → 任务计划程序库 → `Translation AHK (Admin)`（可运行/结束/禁用/删除）。
 
-日常改配置直接用脚本里的「打开脚本」功能，或右键 `Translation.ahk` → Edit with…
+日常改配置可直接右键托盘图标点击 **「编辑脚本」**，或右键 `Translation.ahk` → Edit with…
 （AHK 会自动用 `A_ScriptFullPath` 定位自己，跟目录无关。）
 
 ### 配置与功能说明
 
-- **API Key 配置**：复制 `.env.example` 为 `.env`，填入 `TRANSLATE_API_KEY=你的Key`（`.env` 已被 `.gitignore` 忽略，不会被提交到 Git）。读取优先级为：`CFG.ApiKey`（脚本内）→ 同目录 `.env` → 系统环境变量 `TRANSLATE_API_KEY`。日常更换 Key 直接修改 `.env` 后在托盘菜单点击 **「重新加载」** 即可。
+- **API Key 配置**：复制 `.env.example` 为 `.env`，填入 `TRANSLATE_API_KEY=你的Key`（`.env` 已被 `.gitignore` 忽略，不会被提交到 Git；也可直接填在 `Translation.ahk` 的 `CFG.ApiKey` 中，留空则自动读取 `.env`）。日常更换 Key 直接修改 `.env` 后在托盘菜单点击 **「重新加载」** 即可。
 - **源语言 / 目标语言**：弹窗底栏支持分别设置 **源语言** 与 **目标语言**，中间 `⇄` 可一键互换。
   - 源语言和目标语言默认均为 `"自动"`：原文以中文为主时自动译为地道英文，其他语言统一译为简体中文。
   - 若指定了相同语种（非 `"自动"`），会直接跳过请求。
