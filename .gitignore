@@ -1,0 +1,11 @@
+# 密钥与本地配置
+.env
+.env.*
+!.env.example
+
+# 系统与编辑器临时文件
+Thumbs.db
+.DS_Store
+*.log
+*.bak
+*.tmp
