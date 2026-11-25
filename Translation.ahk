@@ -5,6 +5,8 @@
 ;  划词翻译 · AI 版  （AutoHotkey v2）
 ;
 ;  用法：在任意程序里选中文字 → 按 Ctrl+Alt+T → 弹窗显示译文
+;        原文框随时可改：改完按回车即可重译（Shift+Enter 换行），没选中文字时 Ctrl+Alt+T 直接给空框
+;        另可按 Ctrl+Alt+Y 打开空白输入窗口，敲入文本后回车翻译
 ;        Esc 关闭弹窗 / Ctrl+C 复制结果 / 可切换目标语言后点「重译」
 ;
 ;  支持任何 OpenAI 兼容接口：DeepSeek、Google AI Studio (Gemini)、OpenAI、
@@ -34,6 +36,9 @@
 global CFG := {
     ; 触发快捷键（AHK 语法：^=Ctrl  !=Alt  +=Shift  #=Win）
     Hotkey:          "^!t",
+
+    ; 打开「手动输入」翻译窗口的快捷键（留空则关闭这个功能）
+    InputHotkey:     "^!y",
 
     ; 是否额外支持「连按两次 Ctrl+C」触发（不需要选中后按快捷键）
     DoubleCtrlC:     false,
@@ -95,6 +100,7 @@ global Busy := false          ; 是否正在请求
 global GuiReady := false      ; 界面是否已创建
 global LastText := ""         ; 上一次翻译的原文
 global TapTick := 0           ; 连按 Ctrl+C 的计时
+global SrcBoxH := 100          ; 原文框高度（可编辑，方便改字后重译）
 global Cache := Map()         ; 内存翻译缓存（key: 目标语言 + 原文）
 
 ; 只在「直接运行本文件」时启动界面；被其它脚本 #Include 时只提供函数
@@ -104,8 +110,9 @@ if (A_LineFile = A_ScriptFullPath)
 
 ; 连按两次 Ctrl+C 也可以触发（只在 CFG.DoubleCtrlC 为 true 时才注册，避免干扰平时的复制）
 DoubleCtrlCHandler(*) {
-    global TapTick, Busy
-    if Busy
+    global TapTick
+
+    if !EnsureIdle()
         return
     now := A_TickCount
     if (TapTick && now - TapTick < 500) {
@@ -127,9 +134,8 @@ Main() {
     CoordMode("ToolTip", "Screen")
     SetupTray()
     SetupGui()
-    try Hotkey(CFG.Hotkey, (*) => DoTranslate())
-    catch as e
-        MsgBox("快捷键 " . CFG.Hotkey . " 注册失败：" . e.Message, "划词翻译", "Icon!")
+    RegisterHotkey(CFG.Hotkey, (*) => DoTranslate())
+    RegisterHotkey(CFG.InputHotkey, (*) => OpenInputPanel())
     if CFG.DoubleCtrlC {
         try Hotkey("~^c", DoubleCtrlCHandler)
         catch
@@ -139,10 +145,22 @@ Main() {
 }
 
 
+; 注册全局快捷键（留空就跳过）
+RegisterHotkey(hk, fn) {
+    if (Trim(hk) = "")
+        return
+    try Hotkey(hk, fn)
+    catch as e
+        MsgBox("快捷键 " . hk . " 注册失败：" . e.Message, "划词翻译", "Icon!")
+}
+
+
 SetupTray() {
     menu := A_TrayMenu
     menu.Add()
     menu.Add("翻译选中文本`t" . PrettyHotkey(CFG.Hotkey), (*) => DoTranslate())
+    if (Trim(CFG.InputHotkey) != "")
+        menu.Add("手动输入翻译`t" . PrettyHotkey(CFG.InputHotkey), (*) => OpenInputPanel())
     menu.Add("编辑脚本", (*) => OpenScriptForEdit())
     menu.Add("重新加载", (*) => Reload())
     menu.Add("退出", (*) => ExitApp())
@@ -160,23 +178,70 @@ OpenScriptForEdit() {
 ;───────────────────────────── 取词 & 翻译 ─────────────────────────────
 
 DoTranslate() {
-    global Busy, LastText
+    global CFG
 
-    if Busy {
-        ShowTip("上一次翻译还没结束…")
+    if !EnsureIdle()
         return
-    }
 
-    text := GetSelectedText()
-    text := Trim(text, " `t`r`n")
+    text := Trim(GetSelectedText())
     if (text = "") {
-        ShowTip("没有取到选中文本：先选中文字，再按 " . PrettyHotkey(CFG.Hotkey))
+        ; 没选中文字：直接给一个空框子让你敲
+        OpenInputPanel()
         return
     }
     if !RegExMatch(text, "[\p{L}]") {
         ShowTip("选中内容不含文字，已跳过翻译")
         return
     }
+
+    StartTranslate(text)
+}
+
+
+; 打开空白窗口，手动输入要翻译的文本（Enter 翻译 / Shift+Enter 换行）
+OpenInputPanel() {
+    global LastText
+
+    if !EnsureIdle()
+        return
+
+    LastText := ""
+    ShowPanel("", true)
+    SetStatus("输入文本后回车翻译 · Shift+回车换行 · Esc 关闭")
+}
+
+
+; 回车（或 Ctrl+回车）：把原文框里当前的文本送去翻译
+SubmitInput() {
+    global SrcEdit
+
+    if (!IsObject(SrcEdit) || !EnsureIdle())
+        return
+
+    text := Trim(SrcEdit.Value)
+    if (text = "") {
+        SetStatus("请先输入要翻译的文本，再按回车")
+        SrcEdit.Focus()
+        return
+    }
+    if !RegExMatch(text, "[\p{L}]") {
+        SetStatus("输入内容不含文字，已跳过翻译")
+        return
+    }
+
+    StartTranslate(text)
+}
+
+
+; 原文框的 Enter：直接翻译（Shift+Enter 换行由控件自身处理）
+EnterInSrcEdit(*) {
+    SubmitInput()
+}
+
+
+; 真正开始翻译：截断过长原文、显示面板、发请求（force = 跳过缓存）
+StartTranslate(text, force := false) {
+    global LastText, CFG
 
     if (StrLen(text) > CFG.MaxInputChars) {
         text := SubStr(text, 1, CFG.MaxInputChars)
@@ -185,7 +250,7 @@ DoTranslate() {
 
     LastText := text
     ShowPanel(text)
-    RequestTranslation(text)
+    RequestTranslation(text, force)
 }
 
 
@@ -210,17 +275,14 @@ GetSelectedText() {
 
 
 RequestTranslation(text, force := false) {
-    global CFG, Cur, Busy, Cache
+    global CFG, Cur, Busy, Cache, ResEdit
 
     AbortRequest()
-    if IsObject(ResEdit)
-        ResEdit.Value := ""
 
     source := SourceLangNow()
     target := TargetLangNow()
     if (source != "自动" && source = target) {
-        if IsObject(ResEdit)
-            ResEdit.Value := text
+        ResEdit.Value := text
         SetStatus("源语言与目标语言相同 · 已跳过请求")
         return
     }
@@ -246,8 +308,9 @@ RequestTranslation(text, force := false) {
             Map("role", "user", "content", text)
         ]
     )
-    if (Trim(CFG.ReasoningEffort) != "")
-        payload["reasoning_effort"] := Trim(CFG.ReasoningEffort)
+    effort := Trim(CFG.ReasoningEffort)
+    if (effort != "")
+        payload["reasoning_effort"] := effort
     body := JsonEncode(payload)
 
     try {
@@ -276,7 +339,7 @@ RequestTranslation(text, force := false) {
 
 ; 轮询异步请求，避免界面卡死
 PollTimer() {
-    global CFG, Cur, Busy
+    global CFG, Cur, Busy, ResEdit
 
     if !IsObject(Cur) {
         SetTimer(PollTimer, 0)
@@ -476,6 +539,7 @@ BuildSystemPrompt(source, target) {
 
 SetupGui() {
     global G, SrcEdit, ResEdit, StatusText, DdlSrcLang, BtnSwap, DdlLang, BtnRetry, BtnCopy, BtnClose, CFG
+    global GuiReady
 
     g := Gui("+AlwaysOnTop +Resize +MinSize480x280", "划词翻译 · AI")
     g.BackColor := "0xFFFFFF"
@@ -486,7 +550,7 @@ SetupGui() {
     StatusText := g.AddText("x12 y8 w520 h18 c0x888888", "就绪 · " . CFG.Model)
     StatusText.SetFont("s9", "Microsoft YaHei UI")
 
-    SrcEdit := g.AddEdit("x12 y30 w520 h62 ReadOnly +VScroll", "")
+    SrcEdit := g.AddEdit("x12 y30 w520 h" . SrcBoxH . " +VScroll", "")
     SrcEdit.SetFont("s9", "Microsoft YaHei UI")
 
     ResEdit := g.AddEdit("x12 y104 w520 h248 ReadOnly +VScroll", "")
@@ -511,9 +575,17 @@ SetupGui() {
     g.OnEvent("Close", (*) => ClosePanel())
     g.OnEvent("Size", (guiObj, minMax, w, h) => (minMax = -1 ? 0 : Relayout()))
 
-    ; 窗口是活动窗口时，Esc 关闭
+    ; 窗口是活动窗口时的局部快捷键
     HotIf((*) => WinActive("ahk_id " . g.Hwnd))
     try Hotkey("$Esc", (*) => ClosePanel())
+    try Hotkey("$^Enter", (*) => SubmitInput())
+    try Hotkey("$^NumpadEnter", (*) => SubmitInput())
+    HotIf()
+
+    ; 原文框：回车翻译（Shift+回车换行）
+    HotIf((*) => WinActive("ahk_id " . g.Hwnd) && IsObject(SrcEdit) && SrcEdit.Focused)
+    try Hotkey("$Enter", EnterInSrcEdit)
+    try Hotkey("$NumpadEnter", EnterInSrcEdit)
     HotIf()
 
     G := g
@@ -545,10 +617,13 @@ SwapLangs() {
 
 
 TryShowCached() {
-    global LastText, Busy, Cache
-    if (Busy || Trim(LastText) = "")
+    global Busy, Cache
+    if Busy
         return
-    key := SourceLangNow() . "->" . TargetLangNow() . "`n" . LastText
+    text := CurrentSourceText()
+    if (text = "")
+        return
+    key := SourceLangNow() . "->" . TargetLangNow() . "`n" . text
     if Cache.Has(key)
         ShowResult(Cache[key], 0, true)
 }
@@ -556,9 +631,8 @@ TryShowCached() {
 
 EnsureGui() {
     global GuiReady
-    if (GuiReady && IsObject(G))
-        return
-    SetupGui()
+    if !(GuiReady && IsObject(G))
+        SetupGui()
 }
 
 
@@ -572,13 +646,15 @@ LayoutGui(w, h) {
     if (innerW < 120)
         innerW := 120
 
+    srcH := SrcBoxH
     StatusText.Move(m, 8, innerW, 18)
-    SrcEdit.Move(m, 30, innerW, 62)
+    SrcEdit.Move(m, 30, innerW, srcH)
 
-    resH := h - 106 - 46
+    resY := 30 + srcH + 12
+    resH := h - resY - 46
     if (resH < 40)
         resH := 40
-    ResEdit.Move(m, 104, innerW, resH)
+    ResEdit.Move(m, resY, innerW, resH)
 
     by := h - 36
     DdlSrcLang.Move(m, by, 90, 26)
@@ -600,12 +676,29 @@ Relayout() {
 }
 
 
-ShowPanel(text) {
+ShowPanel(text, focusSrc := false) {
     global G, SrcEdit, ResEdit
 
     EnsureGui()
     SrcEdit.Value := text
     ResEdit.Value := ""
+
+    ; 窗口已经在屏幕上（例如改完原文再回车）：留在原地，不跟着鼠标跑
+    if DllCall("IsWindowVisible", "ptr", G.Hwnd)
+        Relayout()
+    else
+        PlaceNearMouse()
+
+    if (focusSrc)
+        SrcEdit.Focus()
+    else
+        ResEdit.Focus()
+}
+
+
+; 把窗口摆到鼠标附近（靠近屏幕边缘时自动收回可视区域）
+PlaceNearMouse() {
+    global G
 
     CoordMode("Mouse", "Screen")
     MouseGetPos(&mx, &my)
@@ -637,8 +730,6 @@ ShowPanel(text) {
         ny := area.t + 4
     if (nx != gx || ny != gy)
         G.Move(nx, ny)
-
-    ResEdit.Focus()
 }
 
 
@@ -700,12 +791,29 @@ SetStatus(msg) {
 }
 
 
+; 原文框当前内容（框里没字就退回上一次翻译的原文）
+CurrentSourceText() {
+    global SrcEdit, LastText
+    if IsObject(SrcEdit) {
+        t := Trim(SrcEdit.Value)
+        if (t != "")
+            return t
+    }
+    return LastText
+}
+
+
 Retranslate() {
-    global LastText, Busy, ResEdit
-    if (Busy || Trim(LastText) = "")
+    global Busy
+
+    if Busy
         return
-    ResEdit.Value := ""
-    RequestTranslation(LastText, true)
+
+    text := CurrentSourceText()
+    if (text = "")
+        SetStatus("原文框是空的：先输入或选中文字")
+    else
+        StartTranslate(text, true)
 }
 
 
@@ -738,6 +846,17 @@ ShowTip(msg, ms := 1600) {
 
 
 ;───────────────────────────── 小工具 ─────────────────────────────
+
+; 上一次请求还没结束就提示并返回 false
+EnsureIdle() {
+    global Busy
+    if Busy {
+        ShowTip("上一次翻译还没结束…")
+        return false
+    }
+    return true
+}
+
 
 PrettyHotkey(hk) {
     out := hk
