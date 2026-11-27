@@ -298,13 +298,14 @@ RequestTranslation(text, force := false) {
     }
 
     effectiveTarget := (target = "" || target = "自动") ? ResolveAutoTarget(text) : target
+    isIdentifier := IsIdentifierText(text)
     maxOut := Min(4096, Max(256, StrLen(text) * 4))
     payload := Map(
         "model", CFG.Model,
         "temperature", 0.3,
         "max_tokens", maxOut,
         "messages", [
-            Map("role", "system", "content", BuildSystemPrompt(source, effectiveTarget)),
+            Map("role", "system", "content", BuildSystemPrompt(source, effectiveTarget, isIdentifier)),
             Map("role", "user", "content", text)
         ]
     )
@@ -529,8 +530,34 @@ ResolveAutoTarget(text) {
 }
 
 
-BuildSystemPrompt(source, target) {
+IsIdentifierText(text) {
+    tokens := StrSplit(Trim(text), [" ", "`t", "`r", "`n"])
+    count := 0
+    hasCompound := false
+    for token in tokens {
+        if (token = "")
+            continue
+        count += 1
+        if !RegExMatch(token, "^[A-Za-z_][A-Za-z0-9_-]*$") || SubStr(token, -1) = "-"
+            return false
+        if !RegExMatch(token, "[A-Za-z]")
+            return false
+
+        isCompound := RegExMatch(token, "[a-z0-9][A-Z]|[A-Z]{2,}[a-z]|[A-Za-z0-9][_-][A-Za-z0-9]")
+        isAcronym := RegExMatch(token, "^[A-Z0-9_]+$") && RegExMatch(token, "[A-Z]{2,}")
+        if !(isCompound || isAcronym)
+            return false
+        if (isCompound)
+            hasCompound := true
+    }
+    return count > 0 && hasCompound
+}
+
+
+BuildSystemPrompt(source, target, isIdentifier := false) {
     srcPart := (source = "" || source = "自动") ? "" : " from " . source
+    if (isIdentifier)
+        return "Translate" . srcPart . " to " . target . ". If the input is a code identifier (camelCase/PascalCase/snake_case/kebab-case), split it into words and translate naturally; keep common tech acronyms (e.g. HTTP, XML, API, ID, JSON) as uppercase acronyms when appropriate; preserve line breaks; output translation only, no explanations."
     return "Translate" . srcPart . " to " . target . ". Output translation only; preserve formatting, code, and identifiers; no explanations."
 }
 
